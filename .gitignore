@@ -1,0 +1,19 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Personal Claude Code config (shared settings.json may be committed; .local should not)
+.claude/settings.local.json
+
+# HA runtime artifacts (everything in config/ except files we author)
+config/*
+!config/.gitkeep
+
+# Local secrets / fixtures that may contain real tokens
+tests/fixtures/*.local.json
+.env
+.env.*
+!.env.example
