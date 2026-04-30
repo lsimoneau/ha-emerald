@@ -1,0 +1,13 @@
+services:
+  homeassistant:
+    image: ghcr.io/home-assistant/home-assistant:stable
+    container_name: ha-emerald-dev
+    restart: unless-stopped
+    network_mode: host
+    privileged: true
+    environment:
+      TZ: Australia/Sydney
+    volumes:
+      - ./config:/config
+      - ./custom_components:/config/custom_components
+      - /etc/localtime:/etc/localtime:ro
