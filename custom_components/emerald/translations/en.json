@@ -1,0 +1,29 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "data": {
+          "username": "Username",
+          "password": "Password"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Invalid username or password",
+      "cannot_connect": "Failed to connect"
+    },
+    "abort": {
+      "already_configured": "Account is already configured"
+    }
+  },
+  "entity": {
+    "sensor": {
+      "current_temperature": { "name": "Current temperature" },
+      "current_hour_energy": { "name": "Current hour energy" },
+      "power": { "name": "Power" },
+      "energy_today": { "name": "Energy today" },
+      "cost_today": { "name": "Cost today" },
+      "last_synced": { "name": "Last synced" }
+    }
+  }
+}

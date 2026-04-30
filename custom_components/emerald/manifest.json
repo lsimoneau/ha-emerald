@@ -1,0 +1,13 @@
+{
+  "domain": "emerald",
+  "name": "Emerald",
+  "version": "0.0.1",
+  "codeowners": ["@simoneau-louis"],
+  "config_flow": true,
+  "dependencies": [],
+  "documentation": "https://github.com/simoneau-louis/ha-emerald",
+  "integration_type": "hub",
+  "iot_class": "cloud_polling",
+  "issue_tracker": "https://github.com/simoneau-louis/ha-emerald/issues",
+  "requirements": ["emerald-hws==0.0.27"]
+}
