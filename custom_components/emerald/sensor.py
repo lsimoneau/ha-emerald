@@ -118,7 +118,7 @@ class HwsHourlyEnergySensor(_HwsBase):
                 key="current_hour_energy",
                 translation_key="current_hour_energy",
                 device_class=SensorDeviceClass.ENERGY,
-                state_class=SensorStateClass.MEASUREMENT,
+                state_class=SensorStateClass.TOTAL_INCREASING,
                 native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
             ),
         )
