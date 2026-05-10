@@ -11,7 +11,6 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.const import (
-    CURRENCY_DOLLAR,
     UnitOfEnergy,
     UnitOfPower,
     UnitOfTemperature,
@@ -22,12 +21,12 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .api import ElectricityAdvisorInfo, HeatPumpInfo
 from .coordinator import (
-    EaSnapshot,
     ElectricityAdvisorCoordinator,
     EmeraldConfigEntry,
     HwsCoordinator,
 )
 from .device import ea_device_info, hws_device_info
+from .ihd import IhdState
 
 
 async def async_setup_entry(
@@ -49,8 +48,7 @@ async def async_setup_entry(
                 [
                     EaPowerSensor(rt.ea, info),
                     EaEnergyTodaySensor(rt.ea, info),
-                    EaCostTodaySensor(rt.ea, info),
-                    EaLastSyncedSensor(rt.ea, info),
+                    EaLastSeenSensor(rt.ea, info),
                 ]
             )
 
@@ -142,9 +140,7 @@ class HwsHourlyEnergySensor(_HwsBase):
 # ---------- Electricity Advisor sensors ------------------------------------
 
 
-class _EaBase(
-    CoordinatorEntity[ElectricityAdvisorCoordinator], SensorEntity
-):
+class _EaBase(CoordinatorEntity[ElectricityAdvisorCoordinator], SensorEntity):
     _attr_has_entity_name = True
 
     def __init__(
@@ -160,7 +156,7 @@ class _EaBase(
         self._attr_device_info = ea_device_info(info)
 
     @property
-    def _snap(self) -> EaSnapshot | None:
+    def _state(self) -> IhdState | None:
         return (
             self.coordinator.data.get(self._info.id)
             if self.coordinator.data
@@ -169,6 +165,8 @@ class _EaBase(
 
 
 class EaPowerSensor(_EaBase):
+    """Instantaneous house draw, polled from the LiveLink."""
+
     def __init__(
         self,
         coordinator: ElectricityAdvisorCoordinator,
@@ -188,11 +186,13 @@ class EaPowerSensor(_EaBase):
 
     @property
     def native_value(self) -> float | None:
-        s = self._snap
-        return s.latest_power_w if s else None
+        s = self._state
+        return float(s.power_w) if s and s.power_w is not None else None
 
 
 class EaEnergyTodaySensor(_EaBase):
+    """Energy used since local midnight, accumulated from 10-min flash bins."""
+
     def __init__(
         self,
         coordinator: ElectricityAdvisorCoordinator,
@@ -212,11 +212,13 @@ class EaEnergyTodaySensor(_EaBase):
 
     @property
     def native_value(self) -> float | None:
-        s = self._snap
+        s = self._state
         return s.energy_today_kwh if s else None
 
 
-class EaCostTodaySensor(_EaBase):
+class EaLastSeenSensor(_EaBase):
+    """Wall-clock timestamp of the most recent message from the LiveLink."""
+
     def __init__(
         self,
         coordinator: ElectricityAdvisorCoordinator,
@@ -226,37 +228,13 @@ class EaCostTodaySensor(_EaBase):
             coordinator,
             info,
             SensorEntityDescription(
-                key="cost_today",
-                translation_key="cost_today",
-                device_class=SensorDeviceClass.MONETARY,
-                state_class=SensorStateClass.TOTAL_INCREASING,
-                native_unit_of_measurement=CURRENCY_DOLLAR,
-            ),
-        )
-
-    @property
-    def native_value(self) -> float | None:
-        s = self._snap
-        return s.cost_today if s else None
-
-
-class EaLastSyncedSensor(_EaBase):
-    def __init__(
-        self,
-        coordinator: ElectricityAdvisorCoordinator,
-        info: ElectricityAdvisorInfo,
-    ) -> None:
-        super().__init__(
-            coordinator,
-            info,
-            SensorEntityDescription(
-                key="last_synced",
-                translation_key="last_synced",
+                key="last_seen",
+                translation_key="last_seen",
                 device_class=SensorDeviceClass.TIMESTAMP,
             ),
         )
 
     @property
     def native_value(self) -> datetime | None:
-        s = self._snap
-        return s.last_synced if s else None
+        s = self._state
+        return s.last_seen if s else None

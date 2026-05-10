@@ -16,6 +16,7 @@ from .coordinator import (
     HwsCoordinator,
 )
 from .hws import HwsBridge
+from .ihd import IhdBridge
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -52,10 +53,14 @@ async def async_setup_entry(
 
     ea_coord: ElectricityAdvisorCoordinator | None = None
     if discovery.electricity_advisors:
+        ihd_bridge = IhdBridge(hass, discovery.electricity_advisors)
         ea_coord = ElectricityAdvisorCoordinator(
-            hass, entry, rest, discovery.electricity_advisors
+            hass, entry, ihd_bridge, discovery.electricity_advisors
         )
-        await ea_coord.async_config_entry_first_refresh()
+        try:
+            await ea_coord.async_start()
+        except Exception as err:
+            raise ConfigEntryNotReady(f"IHD connect failed: {err}") from err
 
     entry.runtime_data = EmeraldRuntimeData(
         rest=rest, hws=hws_coord, ea=ea_coord
@@ -68,6 +73,9 @@ async def async_unload_entry(
     hass: HomeAssistant, entry: EmeraldConfigEntry
 ) -> bool:
     unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
-    if unloaded and entry.runtime_data.hws is not None:
-        await entry.runtime_data.hws.async_stop()
+    if unloaded:
+        if entry.runtime_data.hws is not None:
+            await entry.runtime_data.hws.async_stop()
+        if entry.runtime_data.ea is not None:
+            await entry.runtime_data.ea.async_stop()
     return unloaded

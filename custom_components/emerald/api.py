@@ -4,16 +4,15 @@ Endpoints in scope:
   - POST /api/v1/customer/sign-in        (login, returns 24h JWT)
   - POST /api/v1/customer/token-refresh  (refresh JWT)
   - GET  /api/v1/customer/property/list  (discovery — heat_pump[] + devices[])
-  - GET  /api/v1/customer/device/get-by-date/flashes-data (EA energy data)
 
-Heat-pump runtime state is delivered over MQTT and handled by the vendored
-`emerald_hws` library, not by this module.
+Runtime state for both heat pumps and Electricity Advisor / LiveLink devices
+arrives via MQTT, not REST. Heat-pump MQTT lives in the vendored `emerald_hws`
+library; LiveLink MQTT (topics `ep/ihd/...`) is handled in `ihd.py`.
 """
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import date
 from typing import Any
 
 import aiohttp
@@ -52,15 +51,16 @@ class HeatPumpInfo:
 
 @dataclass(slots=True)
 class ElectricityAdvisorInfo:
-    """Static metadata for an Electricity Advisor (live data via REST poll)."""
+    """Static metadata for an Electricity Advisor (live data via MQTT push)."""
 
     id: str
     property_id: str
     serial_number: str
     mac_address: str
+    gateway_id: str  # LiveLink UUID — used as MQTT device_id in topic ep/ihd/+/{gateway_id}
     name: str
     nmi: str | None
-    impulse_rate: int | None  # imp/kWh
+    impulse_rate: int | None  # field is labelled "Wh/imp" but is actually imp/kWh
 
 
 @dataclass(slots=True)
@@ -100,7 +100,7 @@ class EmeraldRestClient:
 
     async def async_discover(self) -> Discovery:
         body = await self._get("/customer/property/list")
-        info = body.get("info", {})
+        info = body.get("info") or {}
         properties = list(info.get("property", [])) + list(
             info.get("shared_property", [])
         )
@@ -124,29 +124,23 @@ class EmeraldRestClient:
             for dev in prop.get("devices", []) or []:
                 if dev.get("device_category") != "Electricity Advisor":
                     continue
+                gateway_id = dev.get("gateway_conn_id")
+                if not gateway_id:
+                    # No gateway means no MQTT path; skip rather than half-register.
+                    continue
                 advisors.append(
                     ElectricityAdvisorInfo(
                         id=dev["id"],
                         property_id=dev.get("property_id", prop["id"]),
                         serial_number=dev.get("serial_number", ""),
                         mac_address=dev.get("device_mac_address", ""),
+                        gateway_id=gateway_id,
                         name=dev.get("device_name", "Electricity Advisor"),
                         nmi=dev.get("nmi") or dev.get("NMI"),
                         impulse_rate=dev.get("impulse_rate"),
                     )
                 )
         return Discovery(heat_pumps=heat_pumps, electricity_advisors=advisors)
-
-    async def async_get_flashes(
-        self, device_id: str, day: date
-    ) -> dict[str, Any]:
-        """Return today's flashes-data payload for an Electricity Advisor."""
-        iso = day.isoformat()
-        body = await self._get(
-            "/customer/device/get-by-date/flashes-data",
-            params={"device_id": device_id, "start_date": iso, "end_date": iso},
-        )
-        return body.get("info", {})
 
     async def _get(
         self, path: str, *, params: dict[str, str] | None = None

@@ -22,8 +22,7 @@
       "current_hour_energy": { "name": "Current hour energy" },
       "power": { "name": "Power" },
       "energy_today": { "name": "Energy today" },
-      "cost_today": { "name": "Cost today" },
-      "last_synced": { "name": "Last synced" }
+      "last_seen": { "name": "Last seen" }
     }
   }
 }
