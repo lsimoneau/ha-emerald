@@ -1,18 +1,25 @@
 """Async REST client for the Emerald cloud API.
 
 Endpoints in scope:
-  - POST /api/v1/customer/sign-in        (login, returns 24h JWT)
-  - POST /api/v1/customer/token-refresh  (refresh JWT)
-  - GET  /api/v1/customer/property/list  (discovery — heat_pump[] + devices[])
+  - POST /api/v1/customer/sign-in                          (login, 24h JWT)
+  - POST /api/v1/customer/token-refresh                    (refresh JWT)
+  - GET  /api/v1/customer/property/list                    (discovery)
+  - GET  /api/v1/customer/device/get-by-date/flashes-data  (EA daily total —
+                                                            used only to seed
+                                                            today's running
+                                                            total at startup)
 
-Runtime state for both heat pumps and Electricity Advisor / LiveLink devices
-arrives via MQTT, not REST. Heat-pump MQTT lives in the vendored `emerald_hws`
-library; LiveLink MQTT (topics `ep/ihd/...`) is handled in `ihd.py`.
+Live runtime state (heat pump and Electricity Advisor / LiveLink) arrives via
+MQTT. Heat-pump MQTT lives in the vendored `emerald_hws` library; LiveLink
+MQTT (topics `ep/ihd/...`) is handled in `ihd.py`. The flashes-data endpoint
+is consulted once per integration setup to backfill the day's energy use that
+happened before the process was running.
 """
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import date
 from typing import Any
 
 import aiohttp
@@ -141,6 +148,28 @@ class EmeraldRestClient:
                     )
                 )
         return Discovery(heat_pumps=heat_pumps, electricity_advisors=advisors)
+
+    async def async_get_today_kwh(
+        self, device_id: str, day: date
+    ) -> float | None:
+        """Return total_kwh_of_day for an EA on `day`, or None if the cloud
+        has nothing for that date yet.
+
+        Used at integration startup to seed `IhdState.energy_today_kwh` so
+        the daily energy sensor reflects the day so far rather than only
+        what we observe via MQTT after this process started.
+        """
+        iso = day.isoformat()
+        body = await self._get(
+            "/customer/device/get-by-date/flashes-data",
+            params={"device_id": device_id, "start_date": iso, "end_date": iso},
+        )
+        info = body.get("info") or {}
+        for d in info.get("daily_consumptions") or []:
+            if d.get("date_string") == iso:
+                total = d.get("total_kwh_of_day")
+                return float(total) if total is not None else None
+        return None
 
     async def _get(
         self, path: str, *, params: dict[str, str] | None = None

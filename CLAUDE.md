@@ -36,11 +36,20 @@ docker compose logs -f               # tail HA logs
 
 ## Design notes worth remembering
 
-**Two transports, one account.** HWS state is pushed over AWS IoT MQTT (region
-`ap-southeast-2`, Cognito identity pool auth) using the upstream `emerald-hws`
-library — vendored as a runtime dep rather than reimplemented. EA has only a
-REST API and 10-minute resolution; we poll once a minute. `EmeraldRuntimeData`
-holds both coordinators, each `Optional` so single-product accounts work.
+**Two transports, one account.** Both HWS and EA state are pushed over AWS
+IoT MQTT (region `ap-southeast-2`, Cognito identity pool auth). HWS uses the
+upstream `emerald-hws` library — vendored as a runtime dep rather than
+reimplemented. EA uses our own `IhdBridge` (`ihd.py`) on the same MQTT
+endpoint; it polls `cur_consump` every 30 s and consumes auto-pushed
+`ihd_10min` energy bins. The poll doubles as a keep-alive — the LiveLink
+stops uploading bins when nothing is talking to it. The cloud REST API is
+consulted once at startup to seed today's running energy total
+(`async_get_today_kwh`), so the daily-energy sensor reflects the day so far
+rather than only what was observed since the integration started. A
+`counted_through` watermark on `IhdState` prevents the LiveLink's
+post-wakeup backlog (or QoS-1 redeliveries) from being double-counted.
+`EmeraldRuntimeData` holds both coordinators, each `Optional` so
+single-product accounts work.
 
 **Sync→async boundary.** `emerald_hws` is synchronous and uses background
 threads for MQTT callbacks. Everything goes through `hass.async_add_executor_job`,

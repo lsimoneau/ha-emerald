@@ -34,7 +34,12 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.util import dt as dt_util
 
-from .api import ElectricityAdvisorInfo
+from .api import (
+    ElectricityAdvisorInfo,
+    EmeraldApiError,
+    EmeraldAuthError,
+    EmeraldRestClient,
+)
 from .const import COGNITO_IDENTITY_POOL_ID, IHD_POLL_INTERVAL, MQTT_HOST
 
 _LOGGER = logging.getLogger(__name__)
@@ -56,6 +61,11 @@ class IhdState:
     # Latest 10-min bin (for diagnostics / short-term graphs).
     latest_bin_kwh: float | None = None
     latest_bin_end: datetime | None = None
+    # Watermark: bins with end_time <= this are skipped. Set by the REST seed
+    # (so backlog bins the LiveLink subsequently uploads aren't double-counted)
+    # and by each accepted bin (so QoS-1 redeliveries are idempotent). Cleared
+    # on date rollover.
+    counted_through: datetime | None = None
 
 
 @dataclass
@@ -72,9 +82,11 @@ class IhdBridge:
     def __init__(
         self,
         hass: HomeAssistant,
+        rest: EmeraldRestClient,
         infos: list[ElectricityAdvisorInfo],
     ) -> None:
         self._hass = hass
+        self._rest = rest
         self._infos: dict[str, ElectricityAdvisorInfo] = {ea.id: ea for ea in infos}
         self._states: dict[str, IhdState] = {ea.id: IhdState() for ea in infos}
         # Multiple EAs could share one gateway; group accordingly.
@@ -96,12 +108,49 @@ class IhdBridge:
         return self._states.get(ea_id)
 
     async def async_start(self) -> None:
+        # Seed today's running totals from REST *before* MQTT connects, so any
+        # backlog bins the LiveLink uploads after we wake it up are skipped via
+        # the `counted_through` watermark rather than double-counted.
+        await self._async_seed_today()
         await self._hass.async_add_executor_job(self._connect_blocking)
         # Ask each gateway for its hw_id / serial so we can build sub_device_ids.
         await self._hass.async_add_executor_job(self._publish_get_gw_info_all)
         self._poll_unsub = async_track_time_interval(
             self._hass, self._async_poll_tick, IHD_POLL_INTERVAL
         )
+
+    async def _async_seed_today(self) -> None:
+        """Pre-fill today's running total from the REST flashes-data endpoint."""
+        now_local = dt_util.now()
+        today = now_local.date()
+        # Floor to the most recent 10-min boundary; bins ending at or before
+        # this we treat as already counted in the REST total.
+        floor = now_local.replace(
+            minute=now_local.minute - now_local.minute % 10,
+            second=0,
+            microsecond=0,
+        )
+        for ea_id, info in self._infos.items():
+            try:
+                kwh = await self._rest.async_get_today_kwh(info.id, today)
+            except (EmeraldApiError, EmeraldAuthError) as err:
+                _LOGGER.warning(
+                    "ihd: REST seed failed for %s (%s) — energy_today starts at 0",
+                    ea_id,
+                    err,
+                )
+                continue
+            st = self._states[ea_id]
+            st.today = today
+            st.energy_today_kwh = round(kwh or 0.0, 4)
+            st.counted_through = floor
+            _LOGGER.info(
+                "ihd: seeded %s today=%s kwh=%.4f through=%s",
+                ea_id,
+                today,
+                st.energy_today_kwh,
+                floor.isoformat(),
+            )
 
     async def async_stop(self) -> None:
         if self._poll_unsub is not None:
@@ -312,11 +361,17 @@ class IhdBridge:
             info = self._infos[ea_id]
             kwh = _flashes_to_kwh(int(flashes), info.impulse_rate)
             if st.today != bin_date:
-                # Rolled over — reset the running total so the daily energy
-                # sensor reflects only this date.
+                # Rolled over — reset the running total and the watermark so
+                # the daily energy sensor reflects only this date.
                 st.today = bin_date
                 st.energy_today_kwh = 0.0
+                st.counted_through = None
+            elif st.counted_through and end_local <= st.counted_through:
+                # Already counted via REST seed or a prior MQTT delivery; skip
+                # to avoid double-counting backlog uploads or QoS-1 retries.
+                continue
             st.energy_today_kwh = round(st.energy_today_kwh + kwh, 4)
+            st.counted_through = end_local
             st.latest_bin_kwh = round(kwh, 4)
             st.latest_bin_end = (
                 dt_util.as_utc(end_local) if end_dt else dt_util.utcnow()

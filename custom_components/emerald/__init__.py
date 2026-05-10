@@ -53,7 +53,7 @@ async def async_setup_entry(
 
     ea_coord: ElectricityAdvisorCoordinator | None = None
     if discovery.electricity_advisors:
-        ihd_bridge = IhdBridge(hass, discovery.electricity_advisors)
+        ihd_bridge = IhdBridge(hass, rest, discovery.electricity_advisors)
         ea_coord = ElectricityAdvisorCoordinator(
             hass, entry, ihd_bridge, discovery.electricity_advisors
         )

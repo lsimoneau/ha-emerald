@@ -51,14 +51,18 @@ meantime.
   (Cognito-authed WebSockets). The integration uses the upstream
   [`emerald-hws`](https://pypi.org/project/emerald-hws/) Python package as the
   transport layer and bridges its threaded callbacks into HA's event loop.
-- **Electricity Advisor:** there is no live-power endpoint in the cloud API —
-  the device uploads data in 10-minute bins to
-  `api.emerald-ems.com.au`. The integration polls the `flashes-data`
-  endpoint once a minute and reports the most recent non-empty bin.
+- **Electricity Advisor:** state arrives over the same AWS IoT MQTT
+  endpoint as the heat pump. The integration polls the LiveLink for
+  `cur_consump` every 30 s (live wattage) and consumes the LiveLink's
+  auto-pushed `ihd_10min` energy bins. The 30 s poll doubles as a
+  keep-alive — the LiveLink only uploads while something is talking to
+  it. Today's running total is seeded once on startup from the cloud
+  REST API so the daily-energy sensor reflects the morning rather than
+  only the time since Home Assistant was last restarted.
 
 This means everything works without any local network access to the devices
-themselves, but live wattage has 10-minute granularity. For sub-second power
-data you'd need direct BLE to the EA, which is out of scope here.
+themselves. For sub-second power data you'd need direct BLE to the EA,
+which is out of scope here.
 
 ## Development
 
