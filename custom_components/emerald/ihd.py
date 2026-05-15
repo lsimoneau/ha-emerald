@@ -102,7 +102,6 @@ class IhdBridge:
         hass: HomeAssistant,
         rest: EmeraldRestClient,
         infos: list[ElectricityAdvisorInfo],
-        client_id: str,
     ) -> None:
         self._hass = hass
         self._rest = rest
@@ -113,10 +112,6 @@ class IhdBridge:
         for ea in infos:
             ctx = self._gateways.setdefault(ea.gateway_id, _GatewayCtx(ea.gateway_id))
             ctx.ea_ids.append(ea.id)
-        # Stable client_id — without one, AWS IoT assigns a fresh `$GEN/<uuid>`
-        # on every connection, which breaks broker-side session takeover on
-        # reconnect and leaves zombie sessions hanging around.
-        self._client_id = client_id
         self._client: mqtt5.Client | None = None
         self._connected = threading.Event()
         self._on_update: Callable[[], None] | None = None
@@ -199,11 +194,14 @@ class IhdBridge:
             tls_ctx=io.ClientTlsContext(io.TlsContextOptions()),
         )
         self._connected.clear()
+        # No client_id — match emerald_hws's pattern (broker assigns a fresh
+        # `$GEN/<uuid>` per connect). A stable id triggers broker-side session
+        # takeover semantics that empirically didn't help our cold-start
+        # zombie and may actively race with the SUBACK.
         client = mqtt5_client_builder.websockets_with_default_aws_signing(
             endpoint=MQTT_HOST,
             region=region,
             credentials_provider=creds,
-            client_id=self._client_id,
             on_lifecycle_connection_success=lambda _data: self._connected.set(),
             on_lifecycle_connection_failure=self._on_connection_failure,
             on_lifecycle_disconnection=self._on_lifecycle_disconnection,
@@ -214,15 +212,15 @@ class IhdBridge:
             # Tear the half-built client down before raising — otherwise its
             # background threads leak and the next reconnect attempt has to
             # contend with them.
-            try:
-                client.stop()
-            except Exception:  # noqa: BLE001
-                pass
+            self._stop_client_blocking(client)
             raise RuntimeError("IHD MQTT did not connect within 30s")
         self._client = client
         # Give the fresh connection a full staleness window before the next
         # liveness check fires, so subscribe / get_gw_info round-trips have
-        # time to land.
+        # time to land. This is also our cold-start grace — emerald_hws's
+        # equivalent skips the watchdog entirely until first inbound, which
+        # works for heat pumps that always respond to `comp_query` but would
+        # leave us with no recovery path when the LiveLink stays silent.
         self._last_inbound_monotonic = time.monotonic()
 
         for gw_id in self._gateways:
@@ -251,12 +249,26 @@ class IhdBridge:
     def _disconnect_blocking(self) -> None:
         if self._client is None:
             return
-        try:
-            self._client.stop()
-        except Exception as exc:  # noqa: BLE001 — best-effort shutdown
-            _LOGGER.debug("ihd: stop raised: %s", exc)
+        self._stop_client_blocking(self._client)
         self._client = None
         self._connected.clear()
+
+    def _stop_client_blocking(self, client: mqtt5.Client) -> None:
+        # Wait on the stop future before declaring the old client dead.
+        # awscrt's `stop()` returns immediately; the actual teardown happens
+        # on its background threads, which can otherwise outlive the call
+        # and race the next connect attempt. emerald_hws does the same.
+        try:
+            stop_future = client.stop()
+        except Exception as exc:  # noqa: BLE001 — best-effort shutdown
+            _LOGGER.debug("ihd: stop raised: %s", exc)
+            return
+        if stop_future is None:
+            return
+        try:
+            stop_future.result(10)
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.debug("ihd: stop future did not complete cleanly: %s", exc)
 
     def _on_connection_failure(self, data: Any) -> None:
         _LOGGER.warning("ihd: MQTT connection failure: %s", data)

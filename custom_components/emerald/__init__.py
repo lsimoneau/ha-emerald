@@ -53,15 +53,7 @@ async def async_setup_entry(
 
     ea_coord: ElectricityAdvisorCoordinator | None = None
     if discovery.electricity_advisors:
-        # Pin the AWS IoT client_id to the config entry, so reconnects reuse
-        # the same broker-side identity and the previous session is cleanly
-        # taken over rather than left as a zombie under a fresh $GEN/ id.
-        ihd_bridge = IhdBridge(
-            hass,
-            rest,
-            discovery.electricity_advisors,
-            client_id=f"ha-emerald-{entry.entry_id}",
-        )
+        ihd_bridge = IhdBridge(hass, rest, discovery.electricity_advisors)
         ea_coord = ElectricityAdvisorCoordinator(
             hass, entry, ihd_bridge, discovery.electricity_advisors
         )

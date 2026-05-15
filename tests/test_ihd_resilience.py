@@ -40,9 +40,7 @@ def _bridge() -> IhdBridge:
         return fn(*args)
 
     hass.async_add_executor_job = AsyncMock(side_effect=_run)
-    return IhdBridge(
-        hass=hass, rest=AsyncMock(), infos=[_info()], client_id="ha-emerald-t"
-    )
+    return IhdBridge(hass=hass, rest=AsyncMock(), infos=[_info()])
 
 
 def _empty_packet() -> SimpleNamespace:
