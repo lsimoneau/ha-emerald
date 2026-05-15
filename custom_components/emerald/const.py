@@ -14,3 +14,9 @@ COGNITO_IDENTITY_POOL_ID = "ap-southeast-2:f5bbb02c-c00e-4f10-acb3-e7d1b05268e8"
 # How often to ask the LiveLink for current power. Doubles as a keep-alive
 # — the gateway stops pushing 10-min bins if it isn't being talked to.
 IHD_POLL_INTERVAL = timedelta(seconds=30)
+
+# How long we tolerate silence on the MQTT subscription before assuming the
+# AWS IoT session has gone zombie and forcing a teardown + reconnect. Each
+# poll round-trip should yield one inbound message; six missed polls in a row
+# is well past anything explainable by transient network jitter.
+IHD_STALE_RECONNECT_AFTER = timedelta(seconds=180)

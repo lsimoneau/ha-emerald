@@ -22,6 +22,7 @@ import json
 import logging
 import random
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -40,7 +41,12 @@ from .api import (
     EmeraldAuthError,
     EmeraldRestClient,
 )
-from .const import COGNITO_IDENTITY_POOL_ID, IHD_POLL_INTERVAL, MQTT_HOST
+from .const import (
+    COGNITO_IDENTITY_POOL_ID,
+    IHD_POLL_INTERVAL,
+    IHD_STALE_RECONNECT_AFTER,
+    MQTT_HOST,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -98,6 +104,12 @@ class IhdBridge:
         self._connected = threading.Event()
         self._on_update: Callable[[], None] | None = None
         self._poll_unsub: Callable[[], None] | None = None
+        # Monotonic timestamp of the last inbound MQTT message — the canonical
+        # liveness signal. We've observed the awscrt client go zombie (publishes
+        # silently queue, no lifecycle event fires) after a credential renewal
+        # failure; staleness here is the only reliable way to detect it.
+        self._last_inbound_monotonic: float | None = None
+        self._reconnect_in_progress = False
 
     # ---- public API used by the coordinator -------------------------------
 
@@ -169,18 +181,31 @@ class IhdBridge:
             identity=identity,
             tls_ctx=io.ClientTlsContext(io.TlsContextOptions()),
         )
+        self._connected.clear()
         client = mqtt5_client_builder.websockets_with_default_aws_signing(
             endpoint=MQTT_HOST,
             region=region,
             credentials_provider=creds,
             on_lifecycle_connection_success=lambda _data: self._connected.set(),
             on_lifecycle_connection_failure=self._on_connection_failure,
+            on_lifecycle_disconnection=self._on_lifecycle_disconnection,
             on_publish_received=self._on_publish_received,
         )
         client.start()
         if not self._connected.wait(timeout=30):
+            # Tear the half-built client down before raising — otherwise its
+            # background threads leak and the next reconnect attempt has to
+            # contend with them.
+            try:
+                client.stop()
+            except Exception:  # noqa: BLE001
+                pass
             raise RuntimeError("IHD MQTT did not connect within 30s")
         self._client = client
+        # Give the fresh connection a full staleness window before the next
+        # liveness check fires, so subscribe / get_gw_info round-trips have
+        # time to land.
+        self._last_inbound_monotonic = time.monotonic()
 
         for gw_id in self._gateways:
             for direction in ("from_dev", "from_gw"):
@@ -207,6 +232,14 @@ class IhdBridge:
 
     def _on_connection_failure(self, data: Any) -> None:
         _LOGGER.warning("ihd: MQTT connection failure: %s", data)
+
+    def _on_lifecycle_disconnection(self, data: Any) -> None:
+        # Flip the flag and log; the next poll tick's staleness check is what
+        # actually drives recovery — we don't trust this callback alone, since
+        # the zombie-client case we're hardening against is precisely the one
+        # where it doesn't fire.
+        self._connected.clear()
+        _LOGGER.warning("ihd: MQTT disconnected: %s", data)
 
     # ---- publish helpers (called from executor) ---------------------------
 
@@ -279,6 +312,10 @@ class IhdBridge:
     # ---- inbound messages (called from MQTT thread) ------------------------
 
     def _on_publish_received(self, data: Any) -> None:
+        # Refresh the liveness watermark on *any* inbound traffic, before we
+        # try to decode — the byte stream proves the link is alive whether or
+        # not we can parse what came in.
+        self._last_inbound_monotonic = time.monotonic()
         try:
             pkt = data.publish_packet
             payload = json.loads(pkt.payload.decode("utf-8", errors="replace"))
@@ -386,8 +423,46 @@ class IhdBridge:
     # ---- polling tick (HA event loop) -------------------------------------
 
     async def _async_poll_tick(self, _now: datetime) -> None:
+        if self._is_stale():
+            await self._async_force_reconnect()
+            return  # next tick resumes normal polling on the fresh connection
         for ea_id in self._infos:
             await self._hass.async_add_executor_job(self._publish_cur_consump, ea_id)
+
+    def _is_stale(self) -> bool:
+        if self._reconnect_in_progress:
+            return False
+        if self._client is None or self._last_inbound_monotonic is None:
+            return True
+        elapsed = time.monotonic() - self._last_inbound_monotonic
+        return elapsed > IHD_STALE_RECONNECT_AFTER.total_seconds()
+
+    async def _async_force_reconnect(self) -> None:
+        if self._reconnect_in_progress:
+            return
+        self._reconnect_in_progress = True
+        try:
+            elapsed: int | None = (
+                None
+                if self._last_inbound_monotonic is None
+                else int(time.monotonic() - self._last_inbound_monotonic)
+            )
+            _LOGGER.warning(
+                "ihd: no inbound MQTT traffic for %ss; tearing down and reconnecting",
+                elapsed,
+            )
+            await self._hass.async_add_executor_job(self._disconnect_blocking)
+            try:
+                await self._hass.async_add_executor_job(self._connect_blocking)
+            except Exception as exc:  # noqa: BLE001 — retry on the next tick
+                _LOGGER.warning(
+                    "ihd: reconnect failed (%s) — will retry next tick", exc
+                )
+                return
+            await self._hass.async_add_executor_job(self._publish_get_gw_info_all)
+            _LOGGER.info("ihd: reconnected")
+        finally:
+            self._reconnect_in_progress = False
 
 
 def _flashes_to_kwh(flashes: int, impulse_rate: int | None) -> float:
