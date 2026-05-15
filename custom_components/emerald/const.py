@@ -20,3 +20,10 @@ IHD_POLL_INTERVAL = timedelta(seconds=30)
 # poll round-trip should yield one inbound message; six missed polls in a row
 # is well past anything explainable by transient network jitter.
 IHD_STALE_RECONNECT_AFTER = timedelta(seconds=180)
+
+# Pause between teardown and rebuild when reconnecting. AWS IoT throttles
+# subscribes per-account at roughly 10/sec and silently *drops* SUBACKs when
+# throttled (rather than returning a reason code) — back-to-back rebuilds
+# produce a "subscribe succeeded but no messages arrive" zombie that looks
+# exactly like the credential-renewal zombie we're already guarding against.
+IHD_RECONNECT_BACKOFF = timedelta(seconds=5)

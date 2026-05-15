@@ -18,6 +18,7 @@ touches HA state crosses back via `hass.loop.call_soon_threadsafe`.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import random
@@ -30,6 +31,7 @@ from typing import Any
 
 import boto3
 from awscrt import auth, io, mqtt5
+from awscrt.mqtt5 import SubackReasonCode
 from awsiot import mqtt5_client_builder
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.event import async_track_time_interval
@@ -44,9 +46,19 @@ from .api import (
 from .const import (
     COGNITO_IDENTITY_POOL_ID,
     IHD_POLL_INTERVAL,
+    IHD_RECONNECT_BACKOFF,
     IHD_STALE_RECONNECT_AFTER,
     MQTT_HOST,
 )
+
+# Granted SUBACK codes; anything else is a broker-side failure we must not
+# silently swallow. The awscrt subscribe future resolves *normally* for any
+# non-success code, so the only way to notice is to inspect this list.
+_SUBSCRIBE_GRANTED = {
+    SubackReasonCode.GRANTED_QOS_0,
+    SubackReasonCode.GRANTED_QOS_1,
+    SubackReasonCode.GRANTED_QOS_2,
+}
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -90,6 +102,7 @@ class IhdBridge:
         hass: HomeAssistant,
         rest: EmeraldRestClient,
         infos: list[ElectricityAdvisorInfo],
+        client_id: str,
     ) -> None:
         self._hass = hass
         self._rest = rest
@@ -100,6 +113,10 @@ class IhdBridge:
         for ea in infos:
             ctx = self._gateways.setdefault(ea.gateway_id, _GatewayCtx(ea.gateway_id))
             ctx.ea_ids.append(ea.id)
+        # Stable client_id — without one, AWS IoT assigns a fresh `$GEN/<uuid>`
+        # on every connection, which breaks broker-side session takeover on
+        # reconnect and leaves zombie sessions hanging around.
+        self._client_id = client_id
         self._client: mqtt5.Client | None = None
         self._connected = threading.Event()
         self._on_update: Callable[[], None] | None = None
@@ -186,6 +203,7 @@ class IhdBridge:
             endpoint=MQTT_HOST,
             region=region,
             credentials_provider=creds,
+            client_id=self._client_id,
             on_lifecycle_connection_success=lambda _data: self._connected.set(),
             on_lifecycle_connection_failure=self._on_connection_failure,
             on_lifecycle_disconnection=self._on_lifecycle_disconnection,
@@ -209,16 +227,26 @@ class IhdBridge:
 
         for gw_id in self._gateways:
             for direction in ("from_dev", "from_gw"):
-                client.subscribe(
+                topic = f"ep/ihd/{direction}/{gw_id}"
+                suback = client.subscribe(
                     subscribe_packet=mqtt5.SubscribePacket(
                         subscriptions=[
                             mqtt5.Subscription(
-                                topic_filter=f"ep/ihd/{direction}/{gw_id}",
+                                topic_filter=topic,
                                 qos=mqtt5.QoS.AT_LEAST_ONCE,
                             ),
                         ],
                     ),
                 ).result(20)
+                # The future resolves normally even when the broker rejected
+                # the subscribe (NOT_AUTHORIZED, throttled, etc). Without this
+                # check we'd happily start polling on a connection that will
+                # never receive anything.
+                bad = [c for c in suback.reason_codes if c not in _SUBSCRIBE_GRANTED]
+                if bad:
+                    raise RuntimeError(
+                        f"subscribe to {topic} rejected by broker: {bad}"
+                    )
 
     def _disconnect_blocking(self) -> None:
         if self._client is None:
@@ -452,6 +480,10 @@ class IhdBridge:
                 elapsed,
             )
             await self._hass.async_add_executor_job(self._disconnect_blocking)
+            # Brief pause so the rebuild's SUBSCRIBE doesn't race AWS IoT's
+            # per-account subscribe throttle, which silently drops SUBACKs
+            # rather than returning a reason code.
+            await asyncio.sleep(IHD_RECONNECT_BACKOFF.total_seconds())
             try:
                 await self._hass.async_add_executor_job(self._connect_blocking)
             except Exception as exc:  # noqa: BLE001 — retry on the next tick

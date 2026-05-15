@@ -40,7 +40,9 @@ def _bridge() -> IhdBridge:
         return fn(*args)
 
     hass.async_add_executor_job = AsyncMock(side_effect=_run)
-    return IhdBridge(hass=hass, rest=AsyncMock(), infos=[_info()])
+    return IhdBridge(
+        hass=hass, rest=AsyncMock(), infos=[_info()], client_id="ha-emerald-t"
+    )
 
 
 def _empty_packet() -> SimpleNamespace:
@@ -95,12 +97,18 @@ def test_reconnect_in_progress_suppresses_staleness() -> None:
     assert bridge._is_stale() is False
 
 
-async def test_force_reconnect_runs_disconnect_then_connect() -> None:
+async def test_force_reconnect_runs_disconnect_then_connect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     bridge = _bridge()
     bridge._client = MagicMock()
     bridge._disconnect_blocking = MagicMock()
     bridge._connect_blocking = MagicMock()
     bridge._publish_get_gw_info_all = MagicMock()
+    # Skip the real backoff so the test runs fast.
+    monkeypatch.setattr(
+        "custom_components.emerald.ihd.asyncio.sleep", AsyncMock()
+    )
 
     await bridge._async_force_reconnect()
 
@@ -110,12 +118,44 @@ async def test_force_reconnect_runs_disconnect_then_connect() -> None:
     assert bridge._reconnect_in_progress is False
 
 
-async def test_force_reconnect_clears_flag_on_connect_failure() -> None:
+async def test_force_reconnect_backs_off_between_disconnect_and_connect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The throttle-avoidance pause must run between teardown and rebuild."""
+    bridge = _bridge()
+    bridge._client = MagicMock()
+    call_order: list[str] = []
+    bridge._disconnect_blocking = MagicMock(
+        side_effect=lambda: call_order.append("disconnect")
+    )
+    bridge._connect_blocking = MagicMock(
+        side_effect=lambda: call_order.append("connect")
+    )
+    bridge._publish_get_gw_info_all = MagicMock()
+
+    async def _record_sleep(_):
+        call_order.append("sleep")
+
+    monkeypatch.setattr(
+        "custom_components.emerald.ihd.asyncio.sleep", _record_sleep
+    )
+
+    await bridge._async_force_reconnect()
+
+    assert call_order == ["disconnect", "sleep", "connect"]
+
+
+async def test_force_reconnect_clears_flag_on_connect_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     bridge = _bridge()
     bridge._client = MagicMock()
     bridge._disconnect_blocking = MagicMock()
     bridge._connect_blocking = MagicMock(side_effect=RuntimeError("nope"))
     bridge._publish_get_gw_info_all = MagicMock()
+    monkeypatch.setattr(
+        "custom_components.emerald.ihd.asyncio.sleep", AsyncMock()
+    )
 
     await bridge._async_force_reconnect()
 

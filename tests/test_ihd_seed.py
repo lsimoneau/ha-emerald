@@ -35,7 +35,7 @@ def _info(ea_id: str = "EA1", gateway: str = "GW1") -> ElectricityAdvisorInfo:
 
 def _bridge(rest: AsyncMock) -> IhdBridge:
     hass = MagicMock()
-    return IhdBridge(hass=hass, rest=rest, infos=[_info()])
+    return IhdBridge(hass=hass, rest=rest, infos=[_info()], client_id="ha-emerald-t")
 
 
 def _publish_packet(
